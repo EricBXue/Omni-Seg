@@ -17,18 +17,20 @@ import matplotlib.pyplot as plt
 import xmltodict
 import pandas as pd
 
-def get_contour_detection(img, contour, cnt_Big, down_rate, shift):
-    vertices = contour['Vertices']['Vertex']
-    cnt = np.zeros((4,1,2))
+#Eric: Vertices code adjusted so that ndpa files can be used
 
-    cnt[0, 0, 0] = vertices[1]['@X']
-    cnt[0, 0, 1] = vertices[0]['@Y']
-    cnt[1, 0, 0] = vertices[1]['@X']
-    cnt[1, 0, 1] = vertices[1]['@Y']
-    cnt[2, 0, 0] = vertices[0]['@X']
-    cnt[2, 0, 1] = vertices[1]['@Y']
-    cnt[3, 0, 0] = vertices[0]['@X']
-    cnt[3, 0, 1] = vertices[0]['@Y']
+def get_contour_detection(img, contour, cnt_Big, down_rate, shift):
+    vertices = contour
+    cnt = np.zeros(4,1,2)
+
+    cnt[0, 0, 0] = vertices[1][0]
+    cnt[0, 0, 1] = vertices[0][1]
+    cnt[1, 0, 0] = vertices[1][0]
+    cnt[1, 0, 1] = vertices[1][1]
+    cnt[2, 0, 0] = vertices[0][0]
+    cnt[2, 0, 1] = vertices[1][1]
+    cnt[3, 0, 0] = vertices[0][0]
+    cnt[3, 0, 1] = vertices[0][1]
 
     cnt = cnt / down_rate
 
@@ -47,19 +49,19 @@ def get_contour_detection(img, contour, cnt_Big, down_rate, shift):
     return glom, cnt
 
 def get_annotation_contour(img, contour, down_rate, shift, lv, start_x, start_y, end_x, end_y, resize_flag):
-    vertices = contour['Vertices']['Vertex']
+    vertices = contour['ndpviewstate'][0]['annotation']['pointlist']
     cnt = np.zeros((4,1,2))
 
     now_id = int(contour['@Id'])
 
-    cnt[0, 0, 0] = vertices[0]['@X']
-    cnt[0, 0, 1] = vertices[0]['@Y']
-    cnt[1, 0, 0] = vertices[1]['@X']
-    cnt[1, 0, 1] = vertices[1]['@Y']
-    cnt[2, 0, 0] = vertices[2]['@X']
-    cnt[2, 0, 1] = vertices[2]['@Y']
-    cnt[3, 0, 0] = vertices[3]['@X']
-    cnt[3, 0, 1] = vertices[3]['@Y']
+    cnt[0, 0, 0] = vertices[0][0]
+    cnt[0, 0, 1] = vertices[0][1]
+    cnt[1, 0, 0] = vertices[1][0]
+    cnt[1, 0, 1] = vertices[1][1]
+    cnt[2, 0, 0] = vertices[2][0]
+    cnt[2, 0, 1] = vertices[2][1]
+    cnt[3, 0, 0] = vertices[3][0]
+    cnt[3, 0, 1] = vertices[3][1]
 
     cnt[0, 0, 0] = cnt[0, 0, 0] - shift
     cnt[1, 0, 0] = cnt[1, 0, 0] - shift
@@ -70,9 +72,8 @@ def get_annotation_contour(img, contour, down_rate, shift, lv, start_x, start_y,
 
     patch_size_x = int((cnt[2, 0, 0] - cnt[0, 0, 0]) / down_rate)
     patch_size_y = int((cnt[2, 0, 1] - cnt[0, 0, 1]) / down_rate)
-
     patch_start_x = cnt[0, 0, 0] + start_x
-    patch_start_y = start_y + cnt[0, 0, 1]
+    patch_start_y = cnt[0, 0, 1] + start_y
     print(patch_start_x,patch_start_y,patch_size_x,patch_size_y)
 
     patch = np.array(img.read_region((patch_start_x, patch_start_y), lv, (patch_size_x, patch_size_y)).convert('RGB'))
@@ -299,17 +300,18 @@ def scn_to_png(svs_file,annotation_xml_file, output_folder, single_annotation):
     # read annotation region
     with open(annotation_xml_file) as fd:
         annotation_doc = xmltodict.parse(fd.read())
-    annotation_layers = annotation_doc['Annotations']['Annotation']
+        print(annotation_doc)
+    annotation_layers = annotation_doc #Eric: changed to ndpviewstate for natural language annotation doc?
     try:
-        annotation_contours = annotation_layers['Regions']['Region']
+        annotation_contours = annotation_layers['annotations'] #Eric: Region refer to the actual location of the annoation contour?
     except:
         if len(annotation_layers) == 2:
             annotation_BBlayer = annotation_layers[0]
-            annotation_regions = annotation_BBlayer['Regions']['Region']
+            annotation_regions = annotation_BBlayer['pointlist']
             annotation_Masklayer = annotation_layers[1]
         else:
             annotation_Masklayer = annotation_layers[0]
-        annotation_contours = annotation_Masklayer['Regions']['Region']
+        annotation_contours = annotation_Masklayer['pointlist']
 
 
     # start_x, start_y = get_nonblack_starting_point(simg)
@@ -371,13 +373,13 @@ def scn_to_png(svs_file,annotation_xml_file, output_folder, single_annotation):
             plt.imsave(os.path.join(X5_output_folder, now_name), patch_5X)
             plt.imsave(os.path.join(X10_output_folder, now_name), patch_10X)
 
-
+# Eric: Edited for correct input
 if __name__ == '__main__':
-    dirpath = 'svs/PAS'
-    filename = '3daf2299-1c81-4a33-9596-0acd09e340e7_S-1909-007149_PAS_1of2.svs'
+    dirpath = '/home/ericxlinux/kidney_segmentation/Omni-Seg/Omni_seg_pipeline_gpu/svs_input'
+    filename = 'BR21-2024-A-1-9-TRI - 2022-08-10 23.46.06.ndpi'
 
     # annotation file
-    now_annotation_xml = 'PAS_3daf.xml'
+    now_annotation_xml = 'BR21-2024-A-1-9-TRI - 2022-08-10 23.46.06.ndpi.ndpa'
 
     # single_annotation indicates that whether the .xml file only contain single region of annotation.
     scn_to_png(dirpath + '/' + filename, dirpath + '/' + now_annotation_xml, dirpath, single_annotation=True)

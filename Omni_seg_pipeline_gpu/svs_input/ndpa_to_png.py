@@ -17,49 +17,150 @@ import matplotlib.pyplot as plt
 import xmltodict
 import pandas as pd
 
-def get_contour_detection(img, contour, cnt_Big, down_rate, shift):
-    vertices = contour['Vertices']['Vertex']
-    cnt = np.zeros((4,1,2))
+#Rachel's code
+import xml.etree.ElementTree as ET # to replace the xmltodict method
+import tifffile as tiff
 
-    cnt[0, 0, 0] = vertices[1]['@X']
-    cnt[0, 0, 1] = vertices[0]['@Y']
-    cnt[1, 0, 0] = vertices[1]['@X']
-    cnt[1, 0, 1] = vertices[1]['@Y']
-    cnt[2, 0, 0] = vertices[0]['@X']
-    cnt[2, 0, 1] = vertices[1]['@Y']
-    cnt[3, 0, 0] = vertices[0]['@X']
-    cnt[3, 0, 1] = vertices[0]['@Y']
 
-    cnt = cnt / down_rate
+#From Rachel's Code
+def extract_raw_annotation(annotation_file):
+    with open(annotation_file, "r") as f:
+        lines = f.readlines()
 
-    # Big_x = (cnt_Big[0, 0, 0] + cnt_Big[1, 0, 0] + cnt_Big[2, 0, 0] + cnt_Big[3, 0, 0]) / 4
-    # Big_y = (cnt_Big[0, 0, 1] + cnt_Big[1, 0, 1] + cnt_Big[2, 0, 1] + cnt_Big[3, 0, 1]) / 4
-    x_min = cnt_Big[0, 0, 0]
-    y_min = cnt_Big[0, 0, 1]
+    num_annotations = sum(1 for line in lines if "ndpviewstate id=" in line)
+    xs_list = [list() for _ in range(num_annotations)]
+    ys_list = [list() for _ in range(num_annotations)]
+    titles_list = [list() for _ in range(num_annotations)]
+    colors_list = [list() for _ in range(num_annotations)]
 
-    cnt[..., 0] = cnt[..., 0] - x_min
-    cnt[..., 1] = cnt[..., 1] - y_min
+    annotation_counter = 0
 
-    cnt[cnt < 0] = 0
+    for line_num, line in enumerate(lines):
+        if line_num <= 1:
+            pass
+        elif "ndpviewstate id=" in line:
+            xs_list[annotation_counter] = list()
+            ys_list[annotation_counter] = list()
+            annotation_counter += 1
+        else:
+            if "<title>" in line:
+                titles_list[annotation_counter - 1] = line.strip()[7:-8]
+            if "<x>" in line:
+                xs_list[annotation_counter - 1].append(int(line.strip()[3:-4]))
+            if "<y>" in line:
+                ys_list[annotation_counter - 1].append(int(line.strip()[3:-4]))
+            if "color" in line:
+                colors_list[annotation_counter - 1] = line.strip()[-9:-2]
 
-    glom = img[int(cnt[0, 0, 1]):int(cnt[3, 0, 1]), int(cnt[0, 0, 0]):int(cnt[1, 0, 0])]
+    for annotation_xs, annotation_ys in zip(xs_list, ys_list):
+        annotation_xs.pop(0)
+        annotation_ys.pop(0)
 
-    return glom, cnt
+    return num_annotations, xs_list, ys_list, titles_list, colors_list
 
+# From Rachel's Code
+def extract_image_data(image_file, pyramid_tier):
+    # Openslide Image Info
+    tif_openslide = openslide.OpenSlide(image_file)
+    x_offset = float(tif_openslide.properties["hamamatsu.XOffsetFromSlideCentre"])
+    y_offset = float(tif_openslide.properties["hamamatsu.YOffsetFromSlideCentre"])
+    x_mpp = float(tif_openslide.properties["openslide.mpp-x"])
+    y_mpp = float(tif_openslide.properties["openslide.mpp-y"])
+    level_dims = tif_openslide.level_dimensions
+    source_lens = float(tif_openslide.properties["hamamatsu.SourceLens"])
+
+    # retrieve array with tifffile - this is done to save memory
+    tif = tiff.TiffFile(image_file)
+    tier_array = np.asarray(tif._series_svs()[pyramid_tier].asarray())
+    image_shape = tier_array.shape
+
+    return (
+        tier_array,
+        image_shape,
+        pyramid_tier,
+        x_offset,
+        y_offset,
+        x_mpp,
+        y_mpp,
+        level_dims,
+        source_lens,
+    )
+
+# From Rachel's Code
+def calc_level_resolution(image, pyramid_tier):
+    (tier_array, image_shape, pyramid_tier, x_offset, y_offset, x_mpp, y_mpp, level_dims, source_lens) = extract_image_data(image, pyramid_tier)
+
+    num_levels = len(level_dims)
+    x_res = np.zeros(num_levels)  # microns per pixel
+    y_res = np.zeros(num_levels)  # microns per pixel
+    zoom = np.zeros(num_levels)
+    zoom[
+        0
+    ] = source_lens  # highest res pyramid level has the zoom of the source lens - 20x
+
+    im_width_microns = x_mpp * level_dims[0][0]
+    im_height_microns = y_mpp * level_dims[0][1]
+
+    for i in range(num_levels):
+        x_res[i] = im_width_microns / level_dims[i][0]
+        y_res[i] = im_height_microns / level_dims[i][1]
+
+    return x_res[pyramid_tier], y_res[pyramid_tier]
+
+# From Rachel's Code
+# convert annotation coords from nm to pixels
+def convert_annotation_coords(image_file, annotation_file, pyramid_tier):
+    (
+        tier_array,
+        image_shape,
+        pyramid_tier,
+        x_offset,
+        y_offset,
+        x_mpp,
+        y_mpp,
+        level_dims,
+        source_lnes,
+    ) = extract_image_data(image_file, pyramid_tier)
+    num_annotations, xs_list, ys_list, _, _ = extract_raw_annotation(annotation_file)
+    x_res, y_res = calc_level_resolution(image_file, pyramid_tier)
+    new_x_coord = [list() for num in range(num_annotations)]
+    new_y_coord = [list() for num in range(num_annotations)]
+
+
+    for i, (annotation_xs, annotation_ys) in enumerate(zip(xs_list, ys_list)):
+        new_x_coord[i] = list()
+        new_y_coord[i] = list()
+        for j, (x_coord, y_coord) in enumerate(zip(annotation_xs, annotation_ys)):
+            new_x_coord[i].append(
+                ((x_coord - x_offset) / (x_res * 1000)) + (image_shape[1] / 2)
+            )
+            new_y_coord[i].append(
+                ((y_coord - y_offset) / (y_res * 1000)) + (image_shape[0] / 2)
+            )
+    return new_x_coord, new_y_coord #are these in units of pixels or in nm
+
+
+#img used to crop the ROI from it, contour to get the vertices coordinates, start/end_x/y to calc patch size and give parameter for croping
 def get_annotation_contour(img, contour, down_rate, shift, lv, start_x, start_y, end_x, end_y, resize_flag):
     vertices = contour['Vertices']['Vertex']
+
+    print('vertices values are', vertices)
+    
     cnt = np.zeros((4,1,2))
 
     now_id = contour['@Id']
 
-    cnt[0, 0, 0] = vertices[0]['@X']
-    cnt[0, 0, 1] = vertices[0]['@Y']
-    cnt[1, 0, 0] = vertices[1]['@X']
-    cnt[1, 0, 1] = vertices[1]['@Y']
-    cnt[2, 0, 0] = vertices[2]['@X']
-    cnt[2, 0, 1] = vertices[2]['@Y']
-    cnt[3, 0, 0] = vertices[3]['@X']
-    cnt[3, 0, 1] = vertices[3]['@Y']
+    #for vertices:1st index(0 for x, 1 for y), 2nd index(which annoation), 3rd index(which point)
+    cnt[0, 0, 0] = vertices[0][now_id-1][0]
+    cnt[0, 0, 1] = vertices[1][now_id-1][0]
+    cnt[1, 0, 0] = vertices[0][now_id-1][1]
+    cnt[1, 0, 1] = vertices[1][now_id-1][1]
+    cnt[2, 0, 0] = vertices[0][now_id-1][2]
+    cnt[2, 0, 1] = vertices[1][now_id-1][2]
+    cnt[3, 0, 0] = vertices[0][now_id-1][3]
+    cnt[3, 0, 1] = vertices[1][now_id-1][3]
+
+    print('shift value:', shift)
 
     cnt[0, 0, 0] = cnt[0, 0, 0] - shift
     cnt[1, 0, 0] = cnt[1, 0, 0] - shift
@@ -68,14 +169,24 @@ def get_annotation_contour(img, contour, down_rate, shift, lv, start_x, start_y,
 
     cnt = cnt.astype(int)
 
-    patch_size_x = int((cnt[2, 0, 0] - cnt[0, 0, 0]) / down_rate)
-    patch_size_y = int((cnt[2, 0, 1] - cnt[0, 0, 1]) / down_rate)
+    print(cnt)
 
-    patch_start_x = cnt[0, 0, 0] + start_x
-    patch_start_y = start_y + cnt[0, 0, 1]
-    print(patch_start_x,patch_start_y,patch_size_x,patch_size_y)
+    print('down rate applied:', down_rate)
 
+    patch_size_x = int(abs(cnt[2, 0, 0] - cnt[0, 0, 0]) / down_rate)
+    patch_size_y = int(abs(cnt[2, 0, 1] - cnt[0, 0, 1]) / down_rate)
+
+
+    #where is the origin (0, 0)? learn how to use vscode debugger
+    patch_start_x = np.min(cnt[:,:,0]) + start_x
+    patch_start_y = np.min(cnt[:,:,1]) + start_y
+    print('patch_start_x:',patch_start_x, 'patch_start_y:',patch_start_y, 'patch_size_x:',patch_size_x, 'patch_size_y:', patch_size_y)
+    print('level number:',lv)
+
+    # where the memory issue occured
     patch = np.array(img.read_region((patch_start_x, patch_start_y), lv, (patch_size_x, patch_size_y)).convert('RGB'))
+
+    
 
     if resize_flag:
         patch_resize = resize(patch, (int(patch.shape[0]/ 2), int(patch.shape[1] / 2)))
@@ -84,223 +195,30 @@ def get_annotation_contour(img, contour, down_rate, shift, lv, start_x, start_y,
         patch_resize = patch
 
     return patch_resize, cnt, now_id
-def get_none_zero(black_arr):
 
-    nonzeros = black_arr.nonzero()
-    starting_y = nonzeros[0].min()
-    ending_y = nonzeros[0].max()
-    starting_x = nonzeros[1].min()
-    ending_x = nonzeros[1].max()
-
-    return starting_x, starting_y, ending_x, ending_y
-
-def get_nonblack_starting_point(simg):
-    px = 0
-    py = 0
-    black_img = simg.read_region((px, py), 3, (3000, 3000))
-    starting_x, starting_y, ending_x, ending_y = get_none_zero(np.array(black_img)[:, :, 0])
-
-    multiples = int(np.floor(simg.level_dimensions[0][0]/float(simg.level_dimensions[3][0])))
-
-    #staring point
-    px2 = (starting_x - 1) * multiples
-    py2 = (starting_y - 1) * multiples
-    #ending point
-    px3 = (ending_x + 1) * multiples
-    py3 = (ending_y + 1) * multiples
-
-    # black_img_big = simg.read_region((px2, py2), 0, (1000, 1000))
-    # offset_x, offset_y, offset_xx, offset_yy = get_none_zero(np.array(black_img_big)[:, :, 0])
-    #
-    # x = px2+offset_x
-    # y = py2+offset_y
-
-    xx, yy = scan_nonblack(simg, px2, py2, px3, py3)
-
-    return xx,yy
-
-def get_nonblack_ending_point(simg):
-    px = 0
-    py = 0
-    black_img = simg.read_region((px, py), 3, (3000, 3000))
-    starting_x, starting_y, ending_x, ending_y = get_none_zero(np.array(black_img)[:, :, 0])
-
-    multiples = int(np.floor(simg.level_dimensions[0][0]/float(simg.level_dimensions[3][0])))
-
-    #staring point
-    px2 = (starting_x - 1) * multiples
-    py2 = (starting_y - 1) * multiples
-    #ending point
-    px3 = (ending_x - 1) * (multiples-1)
-    py3 = (ending_y - 1) * (multiples-1)
-
-    # black_img_big = simg.read_region((px2, py2), 0, (1000, 1000))
-    # offset_x, offset_y, offset_xx, offset_yy = get_none_zero(np.array(black_img_big)[:, :, 0])
-    #
-    # x = px2+offset_x
-    # y = py2+offset_y
-
-    xx, yy = scan_nonblack_end(simg, px2, py2, px3, py3)
-
-    return xx,yy
-
-def scan_nonblack(simg,px_start,py_start,px_end,py_end):
-    offset_x = 0
-    offset_y = 0
-    line_x = py_end-py_start
-    line_y = px_end-px_start
-
-    val = simg.read_region((px_start+offset_x, py_start), 0, (1, 1))
-    arr = np.array(val)[:, :, 0].sum()
-    while arr == 0:
-        val = simg.read_region((px_start+offset_x, py_start), 0, (1, line_x))
-        arr = np.array(val)[:, :, 0].sum()
-        offset_x = offset_x + 1
-
-    val = simg.read_region((px_start, py_start+offset_y), 0, (1, 1))
-    arr = np.array(val)[:, :, 0].sum()
-    while arr == 0:
-        val = simg.read_region((px_start, py_start+offset_y), 0, (line_y, 1))
-        arr = np.array(val)[:, :, 0].sum()
-        offset_y = offset_y + 1
-
-    x = px_start+offset_x-1
-    y = py_start+offset_y-1
-    return x,y
-
-def scan_nonblack_end(simg, px_start, py_start, px_end, py_end):
-    offset_x = 0
-    offset_y = 0
-    line_x = py_end - py_start
-    line_y = px_end - px_start
-
-    val = simg.read_region((px_end + offset_x, py_end), 0, (1, 1))
-    arr = np.array(val)[:, :, 0].sum()
-    while not arr == 0:
-        val = simg.read_region((px_end + offset_x, py_end), 0, (1, line_x))
-        arr = np.array(val)[:, :, 0].sum()
-        offset_x = offset_x + 1
-
-    val = simg.read_region((px_end, py_end + offset_y), 0, (1, 1))
-    arr = np.array(val)[:, :, 0].sum()
-    while not arr == 0:
-        val = simg.read_region((px_end, py_end + offset_y), 0, (line_y, 1))
-        arr = np.array(val)[:, :, 0].sum()
-        offset_y = offset_y + 1
-
-    x = px_end + (offset_x - 1)
-    y = py_end + (offset_y - 1)
-    return x, y
-
-
-directory = ['5X', '10X', '40X']
-
-
-def preprocess_all():
-    for dirpath, _, files in os.walk('svs'):
-        if len(files) > 0:
-            for dirname in directory:
-                path = os.path.join(dirpath, dirname)
-                os.makedirs(path, exist_ok=True)
-
-    for dirpath, dirnames, files in os.walk('svs'):
-        print(f'pre-processing directory: {dirpath}')
-        for file_name in files:
-            print(file_name)
-            img = openslide.open_slide(dirpath + '/' + file_name)
-            x, y = scan_nonblack_end(img, 0, 0, img.dimensions[0], img.dimensions[1])
-            start = img.dimensions - np.array((x, y))
-
-            filename_40X = dirpath + '/' + '40X/40X_' + file_name.replace('.svs', '.png')
-            img.read_region(start, 0, img.dimensions).save(filename_40X)
-
-            img_40X = plt.imread(filename_40X)
-
-            img_10X = resize(img_40X, (int(img_40X.shape[0] / 4), int(img_40X.shape[1] / 4)))
-            filename_10X = dirpath + '/' + '10X/10X_' + file_name.replace('.svs', '.png')
-            plt.imsave(filename_10X, img_10X)
-
-            img_5X = resize(img_40X, (int(img_40X.shape[0] / 8), int(img_40X.shape[1] / 8)))
-            filename_5X = dirpath + '/' + '5X/5X_' + file_name.replace('.svs', '.png')
-            plt.imsave(filename_5X, img_5X)
-
-
-def preprocess_one(dirpath, filename):
-    img = openslide.open_slide(dirpath + '/' + filename)
-    x, y = scan_nonblack_end(img, 0, 0, img.dimensions[0], img.dimensions[1])
-    start = img.dimensions - np.array((x, y))
-
-    filename_40X = dirpath + '/' + '40X/40X_' + filename.replace('.svs', '.png')
-    print('saving 40X png...')
-    img.read_region(start, 0, img.dimensions).save(filename_40X)
-
-    print('reading 40X png...')
-    img_40X = plt.imread(filename_40X)
-
-    print('resizing to 10X...')
-    img_10X = resize(img_40X, (int(img_40X.shape[0] / 4), int(img_40X.shape[1] / 4)))
-    filename_10X = dirpath + '/' + '10X/10X_' + filename.replace('.svs', '.png')
-    print('saving 10X png...')
-    del img_40X
-    plt.imsave(filename_10X, img_10X)
-
-
-    print('resizing to 5X...')
-    img_5X = resize(img_10X, (int(img_10X.shape[0] / 2), int(img_10X.shape[1] / 2)))
-    filename_5X = dirpath + '/' + '5X/5X_' + filename.replace('.svs', '.png')
-    print('saving 5X png...')
-    del img_10X
-    plt.imsave(filename_5X, img_5X)
-
-def find_properties(dirpath, filename):
-    img = openslide.open_slide(dirpath + '/' + filename)
-    print(img.properties)
-
-def test(dirpath, filename):
-    img = openslide.open_slide(dirpath + '/' + filename)
-    print(img.properties)
-    # print(img.level_dimensions)
-    # x, y = scan_nonblack_end(img, 0, 0, img.dimensions[0], img.dimensions[1])
-    # start = img.dimensions - np.array((x, y))
-    # print(img.dimensions)
-    # print(start)
-    #
-    # filename_40X = dirpath + '/' + '40X/40X_left' + filename.replace('.svs', '.png')
-    # print('saving 40X png...')
-    # img_left = img.read_region((0, 0), 0, (int(img.dimensions[0] / 2), img.dimensions[1]))
-    # print(img_left.size)
-    # print('saving left')
-    # img_left.save(filename_40X)
-    #
-    # filename_40X = dirpath + '/' + '40X/40X_right' + filename.replace('.svs', '.png')
-    # img_right = img.read_region((img.dimensions[0], 0), 0, (int(img.dimensions[0] / 2), img.dimensions[1]))
-    # print(img_right.size)
-    # print('saving right')
-    # img_right.save(filename_40X)
-
-    filename_40X = dirpath + '/' + '10X/10X_left' + filename.replace('.svs', '.png')
-    # print(img.level_dimensions[1][0])
-    # img_left = img.read_region((0, 0), 1, (int(img.level_dimensions[1][0] / 2), img.level_dimensions[1][1]))
-    # print('saving...')def get_none_zero(black_arr):
-    # img_left.save(filename_40X)
-
-def read_test(dirpath, filename):
-    filename_40X = dirpath + '/5X/0b8f60ca-2cb1-4e2b-83b8-a5ff6db96346_S-1909-007135_HE_2of2_1.png'
-    img = plt.imread(filename_40X)
-    print(img.shape)
-
-import xml.etree.ElementTree as ET
-
-def scn_to_png(ndpi_file,annotation_ndpa_file, output_folder, single_annotation):
+def scn_to_png(ndpi_file, annotation_ndpa_file, output_folder, single_annotation):
     simg = openslide.open_slide(ndpi_file)
-    print(simg.dimensions)
+    print('this is the size of the ndpi file', simg.dimensions)
     name = os.path.basename(ndpi_file).replace('.ndpi', '')
+
+    #where to add the convert_annotation_contour 
+    pixel_coord = convert_annotation_coords(ndpi_file, annotation_ndpa_file, 0) #pyrimid level 0 to 10(specific to openslide)
+    print('covert corrd ouput:', pixel_coord)
 
 
     # read annotation region
     tree = ET.parse(annotation_ndpa_file)
     root = tree.getroot()
-    annotations = root.findall('ndpviewstate/annotation')
+    ndpviewstates = root.findall('.//ndpviewstate')
+    
+    annotations =[]
+    for ndpviewstate in ndpviewstates:
+        annotation_id = int(ndpviewstate.get('id'))
+        annotations.append(annotation_id)
+    
+    #ET.dump(tree.getroot())
+    print(annotations)
+
     #with open(annotation_dnpa_file) as fd:
     #    annotation_doc = xmltodict.parse(fd.read())
     #annotation_layers = annotation_doc['Annotations']['Annotation']
@@ -324,17 +242,17 @@ def scn_to_png(ndpi_file,annotation_ndpa_file, output_folder, single_annotation)
     start_x, start_y = 0, 0
     if single_annotation:
         for annotation in annotations:
-            pointlist = annotation.find('pointlist')
-            points = pointlist.findall('point')
+            print('annotation in loop', annotation)
             contour = {
                 'Vertices': {
-                'Vertex': [{'@X': point.find('x').text, '@Y': point.find('y').text} for point in points]
+                'Vertex': pixel_coord
                 },
-                '@Id': annotation.get('id')  # Extracting id from the annotation element
+                '@Id': annotation # Extracting id from the annotation element
             }
+
+
             patch_10X, cnt_10X, id = get_annotation_contour(simg, contour, 4, 0, 1, start_x, start_y, end_x, end_y, 0)
-            patch_40X, cnt_40X, _ = get_annotation_contour(simg, contour, simg.level_downsamples[0], 0, 0, start_x, start_y,
-                                                           end_x, end_y, 0)
+            patch_40X, cnt_40X, _ = get_annotation_contour(simg, contour, simg.level_downsamples[0], 0, 0, start_x, start_y, end_x, end_y, 0)
             patch_5X, cnt_5X, _ = get_annotation_contour(simg, contour, 4, 0, 1, start_x, start_y, end_x, end_y, 1)
 
             X40_output_folder = os.path.join(output_folder, '40X')
@@ -356,17 +274,17 @@ def scn_to_png(ndpi_file,annotation_ndpa_file, output_folder, single_annotation)
             plt.imsave(os.path.join(X10_output_folder, now_name), patch_10X)
     else:
          for annotation in annotations:
-            pointlist = annotation.find('pointlist')
-            points = pointlist.findall('point')
+            print('To keep track of which annotation is being done:', annotation)
             contour = {
                  'Vertices': {
-                'Vertex': [{'@X': point.find('x').text, '@Y': point.find('y').text} for point in points]
+                'Vertex': pixel_coord
                 },
-                '@Id': annotation.get('id')
+                '@Id': annotation
             }
+
+
             patch_10X, cnt_10X, id = get_annotation_contour(simg, contour, 4, 0, 1, start_x, start_y, end_x, end_y, 0)
-            patch_40X, cnt_40X, _ = get_annotation_contour(simg, contour, simg.level_downsamples[0], 0, 0, start_x, start_y,
-                                                       end_x, end_y, 0)
+            patch_40X, cnt_40X, _ = get_annotation_contour(simg, contour, simg.level_downsamples[0], 0, 0, start_x, start_y, end_x, end_y, 0)
             patch_5X, cnt_5X, _ = get_annotation_contour(simg, contour, 4, 0, 1, start_x, start_y, end_x, end_y, 1)
 
             X40_output_folder = os.path.join(output_folder, '40X')
@@ -396,4 +314,4 @@ if __name__ == '__main__':
     now_annotation_xml = 'BR22-2073-A-1-9-TRI - 2022-08-08 15.03.42.ndpi.ndpa'
 
     # single_annotation indicates that whether the .xml file only contain single region of annotation.
-    scn_to_png(dirpath + '/' + filename, dirpath + '/' + now_annotation_xml, dirpath, single_annotation=True)
+    scn_to_png(dirpath + '/' + filename, dirpath + '/' + now_annotation_xml, dirpath, single_annotation=False)
